@@ -1,73 +1,56 @@
 import discord
 from discord.ext import commands
-from discord.ui import Button, View
-from flask import Flask, request
-import threading
 import os
+import re
 
-# --- 設定（RenderのEnvironment Variablesで設定するのが安全です） ---
-# 直接書き込む場合は ' ' の中に入れてください
-TOKEN = os.getenv('TOKEN', 'ここにボットのトークン')
-LOG_CHANNEL_ID = int(os.getenv('LOG_CHANNEL_ID', '0'))   # 通知用チャンネルID
-LIST_CHANNEL_ID = int(os.getenv('LIST_CHANNEL_ID', '0')) # 名簿用チャンネルID
+# --- 設定 ---
+TOKEN = os.getenv("TOKEN")
+# 監視したいWebhookが投稿されるチャンネルのID
+WATCH_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID"))
 
 intents = discord.Intents.default()
+intents.message_content = True  # メッセージを読み取るために必須
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# 既に名簿に載った人を記録するセット
+# 実行した人の名前を保存する
 user_list = set()
-
-# 「詳細を表示」ボタンの動作
-class DetailView(View):
-    def __init__(self, uid, name):
-        super().__init__(timeout=None)
-        self.uid = uid
-        self.name = name
-
-    @discord.ui.button(label="詳細を表示", style=discord.ButtonStyle.primary)
-    async def show_details(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # 押した本人にだけ見えるメッセージ
-        detail_msg = (
-            f"**【{self.name} の詳細データ】**\n"
-            f"🆔 ユーザーID: `{self.uid}`\n"
-            f"🔗 プロフィール: https://www.roblox.com/users/{self.uid}/profile"
-        )
-        await interaction.response.send_message(detail_msg, ephemeral=True)
-
-# --- Robloxからデータを受け取るサーバー設定 ---
-app = Flask('')
-
-@app.route('/log', methods=['POST'])
-def log_received():
-    data = request.json
-    name = data.get("name", "Unknown")
-    uid = data.get("id", "0")
-    
-    # Discord送信処理を予約
-    bot.loop.create_task(send_to_discord(name, uid))
-    return "OK", 200
-
-async def send_to_discord(name, uid):
-    # 1. 通知チャンネル（ボタン付き）
-    log_ch = bot.get_channel(LOG_CHANNEL_ID)
-    if log_ch:
-        view = DetailView(uid, name)
-        await log_ch.send(f"🚀 **{name}** がスクリプトを起動しました！", view=view)
-
-    # 2. 名簿チャンネル（初めての人だけ記録）
-    list_ch = bot.get_channel(LIST_CHANNEL_ID)
-    if list_ch and uid not in user_list:
-        user_list.add(uid)
-        await list_ch.send(f"👤 **新規ユーザー登録:** {name} (ID: {uid})")
-
-# サーバー起動用の関数
-def run_server():
-    app.run(host='0.0.0.0', port=10000)
 
 @bot.event
 async def on_ready():
-    print(f'Logged in as {bot.user.name}')
+    print(f'監視ボット起動: {bot.user}')
 
-# サーバーとボットを同時に動かす
-threading.Thread(target=run_server).start()
+@bot.event
+async def on_message(message):
+    # 指定したチャンネル以外は無視
+    if message.channel.id != WATCH_CHANNEL_ID:
+        await bot.process_commands(message)
+        return
+
+    # Webhookやボットの投稿から名前を探す（例: "Player: Name" や "名前: Name" など）
+    # ここでは正規表現を使って、メッセージ内の英数字の名前を抽出する例です
+    # メッセージの形式に合わせて re.search の中身を調整できます
+    content = message.content
+    if not content and message.embeds:
+        # 埋め込み(Embed)の中に名前がある場合
+        content = str(message.embeds[0].to_dict())
+
+    # 例: メッセージ内から「Name: (名前)」というパターンを探す
+    match = re.search(r'(?:Name|Player|名前):\s*(\w+)', content, re.IGNORECASE)
+    if match:
+        player_name = match.group(1)
+        user_list.add(player_name)
+        print(f"リストに追加: {player_name}")
+
+    await bot.process_commands(message)
+
+@bot.command(name="List")
+async def show_list(ctx):
+    if not user_list:
+        await ctx.send("まだ誰もリストに登録されていません。")
+        return
+    
+    names = "\n".join([f"・{name}" for name in user_list])
+    embed = discord.Embed(title="📜 Webhook抽出リスト", description=names, color=0x3498db)
+    await ctx.send(embed=embed)
+
 bot.run(TOKEN)
